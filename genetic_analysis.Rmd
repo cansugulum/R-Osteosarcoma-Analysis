@@ -1,0 +1,145 @@
+---
+title: "Genetic Analysis of Osteosarcoma"
+author: "Cansu Gulum"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r full_analysis_script, echo=TRUE, message=FALSE, warning=FALSE}
+
+# --- 1. SETUP: LOAD LIBRARIES ---
+# Load all necessary packages at the beginning of the script.
+library(tidyverse)
+library(broom)
+
+
+# --- 2. DATA IMPORT AND CLEANING ---
+# Load the raw data from the tab-separated file.
+# This works because our .Rmd file is in the SAME folder as the .tab file.
+data_raw <- read_tsv("Genetic_data.tab")
+
+# The first column, containing gene symbols, is named '...1' by default.
+# We rename it to 'gene_symbol' for clarity.
+data_clean <- data_raw %>% 
+  rename(gene_symbol = `...1`)
+
+
+# --- 3. METADATA CREATION & DATA FINALIZATION ---
+# Create a metadata table to map each sample_id to its experimental condition.
+metadata <- tibble(
+  sample_id = c(
+    "OS052", "OS152", "OS186", "OS457", "OS525", "OS526", "OS384",
+    "OS742", "OS766", "OS774", "OS833", "SJSA", "U2OS", "MG63",
+    "MG63.3", "SaOS2", "HuO9", "HOS", "c143B"
+  ),
+  condition = c(
+    "Primary", "Metastasis", "Metastasis", "Primary", "Metastasis", "Primary", "Primary",
+    "Primary", "Metastasis", "Primary", "Primary", "Commercial", "Commercial", "Commercial",
+    "Commercial", "Commercial", "Commercial", "Commercial", "Commercial"
+  )
+)
+
+# Convert the data from "wide" to "long" (tidy) format.
+data_long <- data_clean %>%
+  pivot_longer(
+    cols = -gene_symbol,
+    names_to = "sample_id",
+    values_to = "expression_level"
+  )
+
+# Join the expression data with the metadata to create the final, analysis-ready dataset.
+data_final <- left_join(data_long, metadata, by = "sample_id")
+
+
+# --- 4. EXPLORATORY ANALYSIS (SINGLE GENE EXAMPLE) ---
+# To illustrate the process, we first analyze and visualize a single gene.
+selected_gen <- "A1BG.AS1"
+
+# Filter the dataset for the selected gene.
+gene_data <- data_final %>%
+  filter(gene_symbol == selected_gen)
+
+# Create a box plot to compare expression levels.
+# We print this plot to the output.
+print(
+  ggplot(data = gene_data, aes(x = condition, y = expression_level, fill = condition)) +
+    geom_boxplot(alpha = 0.7) +
+    geom_jitter(width = 0.2, color = "black", size = 2) +
+    labs(
+      title = paste("Expression Level Comparison for:", selected_gen),
+      subtitle = "Gene Expression Across Different Osteosarcoma Conditions",
+      x = "Condition",
+      y = "Gene Expression (log2CPM + 1)",
+      fill = "Condition"
+    ) +
+    scale_fill_brewer(palette = "Set2") +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(hjust = 0.5),
+      plot.subtitle = element_text(hjust = 0.5)
+    )
+)
+
+# Perform an ANOVA test to check for statistical significance.
+anova_result <- aov(expression_level ~ condition, data = gene_data)
+# Print the summary of the test.
+print(summary(anova_result))
+
+
+# --- 5. GENOME-WIDE STATISTICAL ANALYSIS ---
+# Now, we scale up the analysis to all genes in the dataset.
+# We group by gene, run ANOVA on each, and collect tidy results using broom.
+all_genes_anova <- data_final %>%
+  group_by(gene_symbol) %>%
+  do(tidy(aov(expression_level ~ condition, data = .))) %>%
+  ungroup()
+
+# Adjust p-values for multiple testing using the FDR method to avoid false positives.
+anova_results_clean <- all_genes_anova %>%
+  filter(term == "condition") %>%
+  mutate(p.adj = p.adjust(p.value, method = "fdr")) %>%
+  arrange(p.adj)
+
+# Print the top 6 most significant genes.
+print(head(anova_results_clean))
+
+
+# --- 6. VOLCANO PLOT VISUALIZATION ---
+# Prepare data for the volcano plot by calculating Log2 Fold Change.
+# We compare the mean expression between 'Metastasis' and 'Primary' groups.
+mean_expression <- data_final %>%
+  group_by(gene_symbol, condition) %>%
+  summarise(mean_exp = mean(expression_level), .groups = 'drop')
+
+fold_change_data <- mean_expression %>%
+  pivot_wider(names_from = condition, values_from = mean_exp) %>%
+  filter(!is.na(Metastasis) & !is.na(Primary)) %>%
+  mutate(log2FoldChange = Metastasis - Primary)
+
+# Join fold change data with statistical results.
+volcano_data <- left_join(anova_results_clean, fold_change_data, by = "gene_symbol")
+
+# Identify significant genes based on p-value and fold change thresholds.
+volcano_data <- volcano_data %>%
+  mutate(significant = ifelse(p.adj < 0.05 & abs(log2FoldChange) > 1, "Yes", "No"))
+
+# Create the final volcano plot.
+# We print this plot to the output.
+print(
+  ggplot(data = volcano_data, aes(x = log2FoldChange, y = -log10(p.adj), color = significant)) +
+    geom_point(alpha = 0.6, size = 1.5) +
+    scale_color_manual(values = c("No" = "grey", "Yes" = "red")) +
+    labs(
+      title = "Volcano Plot: Metastasis vs. Primary",
+      x = "Log2 Fold Change",
+      y = "-log10 (Adjusted P-value)",
+      color = "Significant"
+    ) +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(hjust = 0.5),
+      legend.position = "top"
+    ) +
+    geom_vline(xintercept = c(-1, 1), linetype = "dashed", color = "blue") +
+    geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "blue")
+)
